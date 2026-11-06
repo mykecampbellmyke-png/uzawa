@@ -2,7 +2,7 @@ Package: uzawa
 Title: Algorithme d'Uzawa pour Problemes de Point Selle
 Version: 0.0.0.9000
 Authors@R: 
-    person("Ton", "Nom", email = "ton.email@exemple.com",
+    person("Salam", "Berlioux", email = "mykecampbellmyke@gmail.com",
            role = c("aut", "cre"))
 Description: Implementation de l'algorithme d'Uzawa pour resoudre
     des problemes de point selle issus de l'optimisation sous

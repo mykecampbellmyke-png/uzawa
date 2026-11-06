@@ -1,123 +1,184 @@
 # ============================================================
-# Fonction : uzawa_solve
-# Description : Implementation de l'algorithme d'Uzawa pour
-#               resoudre un probleme de point selle issu de
-#               l'optimisation sous contraintes d'egalite
-#               affines.
+# Algorithme d'Uzawa general
 #
 # Probleme resolu :
-#   minimiser  J(u) = 0.5 * u'Au - b'u
-#   sous la contrainte  C u = f
+#   min f(x)
+#   sous g_i(x) <= 0   (inegalites, i = 1..m)
+#   et   h_j(x) = 0    (egalites,   j = 1..p)
 #
-# Algorithme (iteration k) :
-#   1) Etape primale : resoudre A u = b - C' lambda
-#   2) Etape duale   : lambda <- lambda + rho * (C u - f)
+# f, g, h peuvent etre lineaires ou non lineaires.
+# Seule la convexite est supposee pour la convergence.
 #
-# Condition de convergence sur le pas :
-#   0 < rho < 2 * alpha / ||C||^2
-#   ou alpha est la constante d'ellipticite de A.
+# Principe :
+#   Etape primale : minimiser le Lagrangien sans contrainte
+#   Etape duale   : gradient projete pour les inegalites,
+#                   gradient simple pour les egalites.
 # ============================================================
 
-#' Algorithme d'Uzawa pour contraintes d'egalite affines
+
+# Documentation roxygen2 : ces lignes seront transformees
+# automatiquement en fichier .Rd par devtools::document().
+#' Algorithme d'Uzawa general (lineaire et non lineaire)
 #'
-#' Resout le probleme de point selle associe a la minimisation
-#' de J(u) = 0.5 * u'Au - b'u sous la contrainte C u = f.
+#' Resout un probleme d'optimisation avec contraintes
+#' d'inegalite et/ou d'egalite, lineaires ou non lineaires.
 #'
-#' @param A Matrice symetrique definie positive (n x n).
-#' @param b Vecteur du second membre (longueur n).
-#' @param C Matrice de contraintes (m x n).
-#' @param f Vecteur de contraintes (longueur m).
-#' @param rho Pas de mise a jour du multiplicateur.
-#'   Doit verifier 0 < rho < 2 * alpha / ||C||^2.
-#' @param tol Tolerance sur le residu dual (defaut 1e-6).
-#' @param max_iter Nombre maximum d'iterations (defaut 1000).
+#' @param f Fonction objectif f(x) renvoyant un scalaire.
+#' @param x0 Point de depart (vecteur numeric).
+#' @param g Fonction des contraintes d'inegalite g(x) <= 0
+#'   renvoyant un vecteur (ou NULL si aucune).
+#' @param h Fonction des contraintes d'egalite h(x) = 0
+#'   renvoyant un vecteur (ou NULL si aucune).
+#' @param rho Pas de mise a jour du multiplicateur (petit positif).
+#' @param tol_var Tolerance sur la variation des multiplicateurs.
+#' @param tol_feas Tolerance sur la violation des contraintes.
+#' @param max_iter Nombre maximum d'iterations.
+#' @param solver Methode passee a optim() : "BFGS", "L-BFGS-B", etc.
+#' @param lower,upper Bornes optionnelles pour L-BFGS-B.
+#' @param verbose Afficher la progression si TRUE.
 #'
-#' @return Une liste contenant :
-#'   \itemize{
-#'     \item u : solution primale approchee
-#'     \item lambda : multiplicateur de Lagrange approche
-#'     \item iterations : nombre d'iterations effectuees
-#'     \item converged : TRUE si le critere d'arret est atteint
-#'   }
-#'
-#' @examples
-#' A <- diag(2)
-#' b <- c(1, 1)
-#' C <- matrix(c(1, 1), nrow = 1)
-#' f <- 1
-#' res <- uzawa_solve(A, b, C, f, rho = 0.5)
-#' res$u
-#' res$lambda
-#'
+#' @return Une liste avec x, lambda, mu, iterations, converged.
 #' @export
-uzawa_solve <- function(A, b, C, f, rho, tol = 1e-6, max_iter = 1000) {
+uzawa_general <- function(f, x0, g = NULL, h = NULL,
+                          rho = 0.1,
+                          tol_var = 1e-6, tol_feas = 1e-6,
+                          max_iter = 1000,
+                          solver = "BFGS",
+                          lower = -Inf, upper = Inf,
+                          verbose = FALSE) {
 
-  # --- Verification basique des dimensions ---
-  n <- ncol(A)
-  m <- nrow(C)
+  # ----------------------------------------------------------
+  # ETAPE 0 : determination du nombre de contraintes
+  # ----------------------------------------------------------
 
-  if (length(b) != n) {
-    stop("La longueur de b doit etre egale au nombre de colonnes de A.")
-  }
-  if (ncol(C) != n) {
-    stop("Le nombre de colonnes de C doit etre egal a n.")
-  }
-  if (length(f) != m) {
-    stop("La longueur de f doit etre egale au nombre de lignes de C.")
-  }
-  if (rho <= 0) {
-    stop("Le pas rho doit etre strictement positif.")
+  # Si g est NULL, m = 0 ; sinon on evalue g(x0) pour connaitre
+  # le nombre de contraintes d'inegalite.
+  m <- if (is.null(g)) 0L else length(g(x0))
+
+  # Idem pour les contraintes d'egalite h.
+  p <- if (is.null(h)) 0L else length(h(x0))
+
+  # Si aucune contrainte n'est fournie, Uzawa n'a pas de sens :
+  # on renvoie une erreur explicite.
+  if (m == 0 && p == 0) {
+    stop("Aucune contrainte fournie : utiliser optim() directement.")
   }
 
-  # --- Initialisation du multiplicateur ---
-  # On demarre avec lambda = 0 (choix classique).
+  # ----------------------------------------------------------
+  # ETAPE 1 : initialisation
+  # ----------------------------------------------------------
+
+  # Multiplicateurs d'inegalite, initialises a zero.
+  # Ils doivent rester >= 0 (contrainte duale).
   lambda <- rep(0, m)
 
-  # Variable pour stocker la solution primale courante.
-  u <- rep(0, n)
+  # Multiplicateurs d'egalite, initialises a zero.
+  # Ils peuvent etre negatifs ou positifs (pas de projection).
+  mu <- rep(0, p)
 
-  # Indicateur de convergence.
-  converged <- FALSE
+  # Point courant : on demarre au point fourni par l'utilisateur.
+  x <- x0
 
-  # Boucle principale de l'algorithme d'Uzawa.
+  # ----------------------------------------------------------
+  # ETAPE 2 : boucle principale de l'algorithme d'Uzawa
+  # ----------------------------------------------------------
   for (k in seq_len(max_iter)) {
 
-    # --- Etape 1 : resolution primale ---
-    # Pour lambda fixe, on minimise le Lagrangien en u :
-    #   A u = b - C' lambda
-    # On utilise solve() pour resoudre le systeme lineaire.
-    rhs <- b - t(C) %*% lambda
-    u <- solve(A, rhs)
+    # ---- Etape primale : minimisation du Lagrangien ----
 
-    # --- Etape 2 : mise a jour duale ---
-    # lambda <- lambda + rho * (C u - f)
-    # Le residu (C u - f) mesure la violation de contrainte.
-    residual <- as.vector(C %*% u - f)
-    lambda_new <- lambda + rho * residual
-
-    # --- Critere d'arret ---
-    # On compare la variation du multiplicateur a la tolerance.
-    delta <- sqrt(sum((lambda_new - lambda)^2))
-    if (delta < tol) {
-      converged <- TRUE
-      lambda <- lambda_new
-      break
+    # On construit le Lagrangien comme une fonction de y
+    # (variable muette), en figeant lambda et mu courants.
+    lagrangien <- function(y) {
+      # Terme objectif.
+      val <- f(y)
+      # Ajout des termes d'inegalite lambda_i * g_i(y).
+      if (m > 0) val <- val + sum(lambda * g(y))
+      # Ajout des termes d'egalite mu_j * h_j(y).
+      if (p > 0) val <- val + sum(mu * h(y))
+      # Valeur scalaire du Lagrangien au point y.
+      val
     }
 
-    # Mise a jour pour l'iteration suivante.
+    # Resolution du probleme sans contrainte via optim().
+    # On encapsule dans tryCatch pour eviter un crash si
+    # l'optimiseur echoue.
+    res <- tryCatch({
+      # Cas avec bornes : on utilise L-BFGS-B.
+      if (solver == "L-BFGS-B") {
+        optim(par = x, fn = lagrangien, method = "L-BFGS-B",
+              lower = lower, upper = upper,
+              control = list(maxit = 500))
+      } else {
+        # Cas sans bornes : BFGS ou autre methode lisse.
+        optim(par = x, fn = lagrangien, method = solver,
+              control = list(maxit = 500))
+      }
+    }, error = function(e) NULL)
+
+    # Si optim a echoue (res NULL), on s'arrete proprement.
+    if (is.null(res)) {
+      warning("Echec de l'etape primale a l'iteration ", k)
+      return(list(x = x, lambda = lambda, mu = mu,
+                  iterations = k, converged = FALSE))
+    }
+
+    # Nouveau point primal propose par optim().
+    x_new <- res$par
+
+    # ---- Etape duale : mise a jour des multiplicateurs ----
+
+    # Par defaut, on conserve les anciens multiplicateurs.
+    lambda_new <- lambda
+    # S'il y a des inegalites : gradient projete sur R_+.
+    # pmax(0, .) est la projection coordonnee par coordonnee.
+    if (m > 0) {
+      lambda_new <- pmax(0, lambda + rho * g(x_new))
+    }
+
+    # Pour les egalites : pas de projection (multiplicateur libre).
+    mu_new <- mu
+    if (p > 0) {
+      mu_new <- mu + rho * h(x_new)
+    }
+
+    # ---- Criteres d'arret ----
+
+    # Variation maximale des multiplicateurs entre deux iterations.
+    delta_var <- max(
+      if (m > 0) max(abs(lambda_new - lambda)) else 0,
+      if (p > 0) max(abs(mu_new - mu))         else 0
+    )
+
+    # Violation maximale des contraintes au nouveau point.
+    # Pour les inegalites : on ne penalise que g > 0.
+    # Pour les egalites   : on prend la valeur absolue.
+    viol_feas <- max(
+      if (m > 0) max(pmax(0, g(x_new))) else 0,
+      if (p > 0) max(abs(h(x_new)))     else 0
+    )
+
+    # Affichage de la progression si demande.
+    if (verbose) {
+      cat(sprintf("iter %4d | var = %.3e | viol = %.3e\n",
+                  k, delta_var, viol_feas))
+    }
+
+    # Mise a jour effective des variables d'etat.
     lambda <- lambda_new
+    mu     <- mu_new
+    x      <- x_new
+
+    # Test de convergence : les deux criteres doivent etre satisfaits.
+    if (delta_var < tol_var && viol_feas < tol_feas) {
+      return(list(x = x, lambda = lambda, mu = mu,
+                  iterations = k, converged = TRUE,
+                  violation = viol_feas))
+    }
   }
 
-  # --- Avertissement si la convergence n'est pas atteinte ---
-  if (!converged) {
-    warning("Nombre maximum d'iterations atteint sans convergence.")
-  }
-
-  # --- Retour des resultats ---
-  list(
-    u          = as.vector(u),
-    lambda     = as.vector(lambda),
-    iterations = k,
-    converged  = converged
-  )
+  # Si on sort de la boucle sans convergence :
+  warning("Nombre maximum d'iterations atteint.")
+  list(x = x, lambda = lambda, mu = mu,
+       iterations = max_iter, converged = FALSE,
+       violation = viol_feas)
 }
