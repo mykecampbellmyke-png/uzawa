@@ -1,0 +1,16 @@
+Package: uzawa
+Title: Algorithme d'Uzawa pour Problemes de Point Selle
+Version: 0.0.0.9000
+Authors@R: 
+    person("Ton", "Nom", email = "ton.email@exemple.com",
+           role = c("aut", "cre"))
+Description: Implementation de l'algorithme d'Uzawa pour resoudre
+    des problemes de point selle issus de l'optimisation sous
+    contraintes d'egalite affines. La fonction principale
+    uzawa_solve alterne une etape primale (resolution d'un
+    systeme lineaire) et une etape duale (mise a jour du
+    multiplicateur de Lagrange).
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Config/roxygen2/version: 8.1.1
